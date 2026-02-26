@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 import sqlite3
 
-app = FastAPI(title="IMPERIUM PRO")
+app = FastAPI(title="IMPERIUM PRO API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +43,13 @@ def init_db():
             views INTEGER DEFAULT 0
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id INTEGER,
+            ad_id INTEGER,
+            PRIMARY KEY (user_id, ad_id)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -65,6 +72,10 @@ class AdCreate(BaseModel):
     description: str
     image: str
 
+@app.get("/")
+def read_root():
+    return {"message": "IMPERIUM API работает! База на связи."}
+
 @app.post("/api/register")
 def register(user: UserReg):
     conn = get_db()
@@ -74,9 +85,8 @@ def register(user: UserReg):
                        (user.name, user.email, user.password))
         conn.commit()
         return {"status": "success"}
-    except Exception as e:
-        print(f"Ошибка регистрации: {e}")
-        raise HTTPException(status_code=400, detail="Email уже занят")
+    except:
+        raise HTTPException(status_code=400, detail="Email занят")
     finally:
         conn.close()
 
@@ -89,48 +99,44 @@ def login(user: UserLogin):
     conn.close()
     if row:
         return {"id": row["id"], "name": row["name"], "email": row["email"], "rating": row["rating"]}
-    raise HTTPException(status_code=401, detail="Неверные данные")
+    raise HTTPException(status_code=401, detail="Ошибка входа")
 
 @app.get("/api/ads")
 def get_ads():
     conn = get_db()
     cursor = conn.cursor()
-    # Используем LEFT JOIN, чтобы объявление не пропадало, если юзер не найден
     cursor.execute('''
         SELECT ads.*, IFNULL(users.name, 'Аноним') as seller_name, IFNULL(users.rating, 5.0) as seller_rating 
-        FROM ads 
-        LEFT JOIN users ON ads.owner_id = users.id 
+        FROM ads LEFT JOIN users ON ads.owner_id = users.id 
         ORDER BY ads.id DESC
     ''')
     rows = cursor.fetchall()
-    ads = []
-    for r in rows:
-        ads.append({
-            "id": r["id"],
-            "title": r["title"],
-            "price": r["price"],
-            "image": r["image"],
-            "views": r["views"],
-            "seller": {"name": r["seller_name"], "rating": r["seller_rating"]}
-        })
     conn.close()
-    return ads
+    return [
+        {
+            "id": r["id"], "title": r["title"], "price": r["price"], "image": r["image"],
+            "views": r["views"], "category": r["category"], "description": r["description"],
+            "seller": {"name": r["seller_name"], "rating": r["seller_rating"]}
+        } for r in rows
+    ]
 
 @app.post("/api/ads")
 def create_ad(ad: AdCreate):
-    print(f"--- ПРИШЛО ОБЪЯВЛЕНИЕ: {ad.title} от юзера ID {ad.owner_id} ---")
     conn = get_db()
     cursor = conn.cursor()
-    try:
-        cursor.execute('''
-            INSERT INTO ads (owner_id, title, price, category, description, image) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (ad.owner_id, ad.title, ad.price, ad.category, ad.description, ad.image))
-        conn.commit()
-        print("Запись в базу успешна!")
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"ОШИБКА ПРИ ЗАПИСИ: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
+    cursor.execute('''
+        INSERT INTO ads (owner_id, title, price, category, description, image) 
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (ad.owner_id, ad.title, ad.price, ad.category, ad.description, ad.image))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+@app.post("/api/favorites/{ad_id}")
+def add_fav(ad_id: int, user_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO favorites (user_id, ad_id) VALUES (?, ?)', (user_id, ad_id))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
