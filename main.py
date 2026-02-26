@@ -1,12 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi.responses import JSONResponse
+from datetime import datetime
 import sqlite3
 
-app = FastAPI(title="IMPERIUM CLOUD API")
+app = FastAPI()
 
-# Настройка CORS, чтобы сайт на Netlify мог общаться с сервером на Render
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,57 +22,61 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+    # Таблица юзеров + поле последнего входа
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT, email TEXT UNIQUE, password TEXT, rating REAL DEFAULT 5.0)''')
+        name TEXT, email TEXT UNIQUE, password TEXT, 
+        rating REAL DEFAULT 5.0, last_active DATETIME)''')
+    # Таблица объявлений
     cursor.execute('''CREATE TABLE IF NOT EXISTS ads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_id INTEGER, title TEXT, price INTEGER, 
-        category TEXT, description TEXT, image TEXT, views INTEGER DEFAULT 0)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS favorites (
-        user_id INTEGER, ad_id INTEGER, PRIMARY KEY (user_id, ad_id))''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER, 
+        title TEXT, price INTEGER, category TEXT, description TEXT, image TEXT)''')
+    # Таблица сообщений
+    cursor.execute('''CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER, 
+        receiver_id INTEGER, ad_id INTEGER, text TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-class UserReg(BaseModel):
-    name: str; email: str; password: str
-class UserLogin(BaseModel):
-    email: str; password: str
-class AdCreate(BaseModel):
-    owner_id: int; title: str; price: int; category: str; description: str; image: str
+# --- Схемы ---
+class MsgSend(BaseModel):
+    sender_id: int; receiver_id: int; ad_id: int; text: str
 
-@app.get("/")
-def read_root():
-    return {"status": "online", "message": "IMPERIUM API работает официально!"}
-
-@app.post("/api/register")
-def register(user: UserReg):
+# --- ЧАТ ---
+@app.post("/api/messages")
+def send_msg(m: MsgSend):
     conn = get_db(); cursor = conn.cursor()
-    try:
-        cursor.execute('INSERT INTO users (name, email, password) VALUES (?, ?, ?)', (user.name, user.email, user.password))
-        conn.commit(); return {"status": "ok"}
-    except: raise HTTPException(status_code=400, detail="Email занят")
-    finally: conn.close()
+    cursor.execute('INSERT INTO messages (sender_id, receiver_id, ad_id, text) VALUES (?,?,?,?)',
+                   (m.sender_id, m.receiver_id, m.ad_id, m.text))
+    conn.commit(); conn.close()
+    return {"status": "sent"}
 
-@app.post("/api/login")
-def login(user: UserLogin):
+@app.get("/api/messages/{u1}/{u2}")
+def get_chat(u1: int, u2: int):
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE email = ? AND password = ?', (user.email, user.password))
-    row = cursor.fetchone(); conn.close()
-    if row: return {"id": row["id"], "name": row["name"], "email": row["email"], "rating": row["rating"]}
-    raise HTTPException(status_code=401)
-
-@app.get("/api/ads")
-def get_ads():
-    conn = get_db(); cursor = conn.cursor()
-    cursor.execute('SELECT ads.*, users.name as s_name, users.rating as s_rating FROM ads LEFT JOIN users ON ads.owner_id = users.id ORDER BY ads.id DESC')
+    cursor.execute('SELECT * FROM messages WHERE (sender_id=? AND receiver_id=?) OR (sender_id=? AND receiver_id=?) ORDER BY timestamp ASC', (u1, u2, u2, u1))
     rows = cursor.fetchall(); conn.close()
-    return [{"id":r["id"],"title":r["title"],"price":r["price"],"image":r["image"],"category":r["category"],"description":r["description"],"seller":{"name":r["s_name"],"rating":r["s_rating"]}} for r in rows]
+    return [dict(r) for r in rows]
 
-@app.post("/api/ads")
-def create_ad(ad: AdCreate):
+# --- АДМИН-ПАНЕЛЬ ---
+@app.get("/api/admin/stats")
+def get_admin_stats():
     conn = get_db(); cursor = conn.cursor()
-    cursor.execute('INSERT INTO ads (owner_id, title, price, category, description, image) VALUES (?,?,?,?,?,?)', (ad.owner_id, ad.title, ad.price, ad.category, ad.description, ad.image))
-    conn.commit(); conn.close(); return {"status": "ok"}
+    # Считаем всё
+    users = [dict(r) for r in cursor.execute('SELECT id, name, email, last_active FROM users').fetchall()]
+    ads_count = cursor.execute('SELECT COUNT(*) FROM ads').fetchone()[0]
+    msgs_count = cursor.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+    conn.close()
+    return {"users": users, "total_ads": ads_count, "total_messages": msgs_count}
+
+# Обновление онлайна (вызывается при каждом входе юзера)
+@app.post("/api/user/heartbeat/{user_id}")
+def heartbeat(user_id: int):
+    conn = get_db(); cursor = conn.cursor()
+    cursor.execute('UPDATE users SET last_active = ? WHERE id = ?', (datetime.now(), user_id))
+    conn.commit(); conn.close()
+    return {"status": "ok"}
+
+# (Остальные маршруты /register, /login, /ads оставь как были)
